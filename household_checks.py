@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+
+import copy
+import datetime
+import http.server
+import json
+import socket
+import struct
+import threading
+import urllib.parse
+
+# the following try/except block will make the custom check compatible with any Agent version
+try:
+    # first, try to import the base class from new versions of the Agent...
+    from datadog_checks.base import AgentCheck
+except ImportError:
+    # ...if the above failed, the check is running in Agent version < 6.6.0
+    from checks import AgentCheck
+
+# content of the special variable __version__ will be shown in the Agent status page
+__version__ = "1.0.0"
+
+# Ecowitt API hints from:
+# Github pjpeartree/rainmachine-gw1000 gw1000-parser.py
+# Github gjr80/weewx-gw1000 gw1000.py
+
+API        = 1
+PORT       = 45000
+PORT_BCAST = 46000
+HEADER     = 0xffff
+
+CMD = {
+    'BROADCAST' : 0x12,
+    'LIVEDATA'  : 0x27,
+}
+
+LIVEDATA = {
+    # command_byte : (type, device, data_length)
+    0x01: ('temperature', 'indoor', 2),
+    0x02: ('temperature', 'outdoor', 2),
+    0x03: ('ignore', 'dewpoint', 2),
+    0x04: ('ignore', 'windchill', 2),
+    0x05: ('ignore', 'heatindex', 2),
+    0x06: ('humidity', 'indoor', 1),
+    0x07: ('humidity', 'outdoor', 1),
+    0x08: ('pressure_absolute', 'indoor', 2),
+    0x09: ('pressure_relative', 'indoor', 2),
+    0x0a: ('ignore', 'winddir', 2),
+    0x0b: ('ignore', 'windspeed', 2),
+    0x0c: ('ignore', 'gustspeed', 2),
+    0x0d: ('ignore', 't_rainevent', 2),
+    0x0e: ('ignore', 't_rainrate', 2),
+    0x0f: ('ignore', 't_raingain', 2),
+    0x10: ('ignore', 't_rainday', 2),
+    0x11: ('ignore', 't_rainweek', 2),
+    0x12: ('ignore', 't_rainmonth', 4),
+    0x13: ('ignore', 't_rainyear', 4),
+    0x14: ('ignore', 't_raintotals', 4),
+    0x15: ('ignore', 'light', 4),
+    0x16: ('ignore', 'uv', 2),
+    0x17: ('ignore', 'uvi', 1),
+    0x18: ('ignore', 'datetime', 6),
+    0x19: ('ignore', 'daymaxwind', 2),
+    0x1a: ('temperature', 'channel_1', 2),
+    0x1b: ('temperature', 'channel_2', 2),
+    0x1c: ('temperature', 'channel_3', 2),
+    0x1d: ('temperature', 'channel_4', 2),
+    0x1e: ('temperature', 'channel_5', 2),
+    0x1f: ('temperature', 'channel_6', 2),
+    0x20: ('temperature', 'channel_7', 2),
+    0x21: ('temperature', 'channel_8', 2),
+    0x22: ('humidity', 'channel_1', 1),
+    0x23: ('humidity', 'channel_2', 1),
+    0x24: ('humidity', 'channel_3', 1),
+    0x25: ('humidity', 'channel_4', 1),
+    0x26: ('humidity', 'channel_5', 1),
+    0x27: ('humidity', 'channel_6', 1),
+    0x28: ('humidity', 'channel_7', 1),
+    0x29: ('humidity', 'channel_8', 1),
+    0x2a: ('ignore', 'pm251', 2),
+    0x2b: ('ignore', 'soiltemp1', 2),
+    0x2c: ('moisture', 'soil_1', 1),
+    0x2d: ('ignore', 'soiltemp2', 2),
+    0x2e: ('moisture', 'soil_2', 1),
+    0x2f: ('ignore', 'soiltemp3', 2),
+    0x30: ('moisture', 'soil_3', 1),
+    0x31: ('ignore', 'soiltemp4', 2),
+    0x32: ('moisture', 'soil_4', 1),
+    0x33: ('ignore', 'soiltemp5', 2),
+    0x34: ('moisture', 'soil_5', 1),
+    0x35: ('ignore', 'soiltemp6', 2),
+    0x36: ('moisture', 'soil_6', 1),
+    0x37: ('ignore', 'soiltemp7', 2),
+    0x38: ('moisture', 'soil_7', 1),
+    0x39: ('ignore', 'soiltemp8', 2),
+    0x3a: ('moisture', 'soil_8', 1),
+    0x3b: ('ignore', 'soiltemp9', 2),
+    0x3c: ('moisture', 'soil_9', 1),
+    0x3d: ('ignore', 'soiltemp10', 2),
+    0x3e: ('moisture', 'soil_10', 1),
+    0x3f: ('ignore', 'soiltemp11', 2),
+    0x40: ('moisture', 'soil_11', 1),
+    0x41: ('ignore', 'soiltemp12', 2),
+    0x42: ('moisture', 'soil_12', 1),
+    0x43: ('ignore', 'soiltemp13', 2),
+    0x44: ('moisture', 'soil_13', 1),
+    0x45: ('ignore', 'soiltemp14', 2),
+    0x46: ('moisture', 'soil_14', 1),
+    0x47: ('ignore', 'soiltemp15', 2),
+    0x48: ('moisture', 'soil_15', 1),
+    0x49: ('ignore', 'soiltemp16', 2),
+    0x4a: ('moisture', 'soil_16', 1),
+    0x4c: ('ignore', 'lowbatt', 16),
+    0x4d: ('ignore', 'pm251_24h_avg', 2),
+    0x4e: ('ignore', 'pm252_24h_avg', 2),
+    0x4f: ('ignore', 'pm253_24h_avg', 2),
+    0x50: ('ignore', 'pm254_24h_avg', 2),
+    0x51: ('ignore', 'pm252', 2),
+    0x52: ('ignore', 'pm253', 2),
+    0x53: ('ignore', 'pm254', 2),
+    0x58: ('ignore', 'leak1', 1),
+    0x59: ('ignore', 'leak2', 1),
+    0x5a: ('ignore', 'leak3', 1),
+    0x5b: ('ignore', 'leak4', 1),
+    0x60: ('ignore', 'lightningdist', 1),
+    0x61: ('ignore', 'lightningdettime', 4),
+    0x62: ('ignore', 'lightningcount', 4),
+    0x63: ('ignore', 'temp9', 3),
+    0x64: ('ignore', 'temp10', 3),
+    0x65: ('ignore', 'temp11', 3),
+    0x66: ('ignore', 'temp12', 3),
+    0x67: ('ignore', 'temp13', 3),
+    0x68: ('ignore', 'temp14', 3),
+    0x69: ('ignore', 'temp15', 3),
+    0x6a: ('ignore', 'temp16', 3),
+    0x70: ('ignore', 'wh45_data', 16),
+    0x72: ('ignore', 'leafwet1', 1),
+    0x73: ('ignore', 'leafwet2', 1),
+    0x74: ('ignore', 'leafwet3', 1),
+    0x75: ('ignore', 'leafwet4', 1),
+    0x76: ('ignore', 'leafwet5', 1),
+    0x77: ('ignore', 'leafwet6', 1),
+    0x78: ('ignore', 'leafwet7', 1),
+    0x79: ('ignore', 'leafwet8', 1),
+}
+
+def _csum(data):
+    """
+    Ecowitt uses a very simple 1 byte wrapping checksum to validate
+    both requests and responses.
+
+    Returns csum(int).
+    """
+    if isinstance(data, int):
+        data = [data]
+    csum = 0
+    for d in data:
+        csum += d
+    return csum & 0xff
+
+
+def _find(retry_max=3, timeout=1, port_bcast=PORT_BCAST):
+    """
+    Search for the IP address and port of an Ecowitt GW1000 on the
+    local network. Note the detection code seems to only be IPv4.
+
+    Returns ok(bool), name(str), addr(str), port(int). If ok is
+    False all other fields are invalid.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    req_len = 3  # HEADER(2) + len(CMD)(1)
+    # The checksum only sums the CMD and LEN fields.
+    req = struct.pack('!H3B', HEADER, CMD['BROADCAST'], req_len,
+                      _csum(CMD['BROADCAST'] + req_len))
+    data = []
+    for _ in range(retry_max):
+        sock.sendto(req, ('255.255.255.255', port_bcast))
+        try:
+            data = sock.recv(1024)  # Bcast response is 40+ bytes.
+            break
+        except socket.timeout:
+            pass
+    if len(data) > 40:
+        name = data[18:-1].decode('ascii')
+        if name.upper().startswith(('GW1000', 'GW1100')):
+            port = struct.unpack('!H', data[15:17])[0]
+            addr = struct.unpack('!4s', data[11:15])[0]
+            return True, name, socket.inet_ntoa(addr), port
+    return False, '', '', 0
+
+
+class Device(object):
+    def __init__(self, name):
+        self.name = name
+        self._data = {}
+
+    def add(self, name, value):
+        self._data[name] = value
+
+    def data(self):
+        return copy.deepcopy(self._data)
+
+    def __str__(self):
+        units = { 'temperature'       : ' C',
+                  'humidity'          : '%',
+                  'moisture'          : '%',
+                  'pressure_relative' : ' hPa',
+                  'pressure_absolute' : ' hPa' }
+        s = f"{self.name}\n"
+        for k in sorted(self._data.keys()):
+            s += f"  {k} : {self._data[k]}{units.get(k, '')}\n"
+        return s[:-1]
+
+
+class hw(object):
+    def __init__(self, host, port, poll, timeout=10):
+        self.host = host
+        self.port = port
+        self.poll = poll
+        self.timeout = timeout
+        self._lk = threading.Lock()
+        self._data = {}
+        self._ts = datetime.datetime.fromtimestamp(0)  # Unix epoch
+
+    def _fetch_livedata(self, retry_max=3):
+        now = datetime.datetime.now()
+        if self._ts + datetime.timedelta(seconds=self.poll) > now:
+            return
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect((self.host, self.port))
+
+        # Requests have the following format, in bytes:
+        #   HEADER (2), CMD (1), LEN (1), CSUM (1)
+        # The length is in bytes and includes the header but exludes
+        # the checksum. For our use the length is always 3.
+        # The checksum excludes the header and the csum byte.
+        req_len = 3
+        req = struct.pack('!H3B', HEADER, CMD['LIVEDATA'], req_len,
+                          _csum(CMD['LIVEDATA'] + req_len))
+        for _ in range(retry_max):
+            sock.sendall(req)
+            try:
+                data = sock.recv(1024)  # Livedata is < 100 bytes.
+                break
+            except socket.timeout:
+                pass
+
+        data_len = len(data)
+        assert data_len > 5, (
+            f"Invalid short datagram length {data_len}")
+
+        # Remove the header and csum byte when calculating.
+        csum = _csum(data[2:-1])
+        assert csum == data[-1], (
+            f"Invalid checksum '{csum}' != '{data[-1]}'")
+
+        # Validate the response header.
+        header, cmd, rsp_len = struct.unpack("!HBH", data[:5])
+        assert header == HEADER, (
+            f"Invalid header {header} != {HEADER}")
+        assert cmd == CMD['LIVEDATA'], (
+            f"Invalid cmd {cmd} != {CMD['LIVEDATA']}")
+
+        # Validate the header length matches bytes recived. For some
+        # reason the response length does NOT include the header.
+        assert rsp_len == data_len - 2, (
+            "Invalid response length {rsp_len} != {data_len - 2}")
+
+        # Omit the header and checksum byte to parse the payload.
+        self._parse_livedata(now, data[5:-1])
+
+    def _parse_livedata(self, ts, payload):
+        data, fmt = {}, { 1 : "!B", 2 : "!h" }
+        while (payload):
+            value, tmp = None, LIVEDATA.get(payload[0], None)
+            assert tmp is not None, (
+                f"Invalid command byte {payload[0]}")
+            payload = payload[1:]
+            kind, name, byte_len = tmp
+            assert byte_len <= len(payload), (
+                f"Invalid '{kind}' '{name}' '{payload}'")
+            if kind == 'ignore':
+                print(f"# ignoring: {name}")
+            else:
+                value = struct.unpack(fmt[byte_len], payload[:byte_len])[0]
+                if kind in ('temperature', 'pressure_absolute',
+                            'pressure_relative'):
+                    value /= 10.0
+            payload = payload[byte_len:]
+            if value is not None:
+                dev = data.get(name, Device(name))
+                dev.add(kind, value)
+                data[name] = dev
+
+        self._lk.acquire()
+        try:
+            self._ts = copy.deepcopy(ts)
+            self._data = copy.deepcopy(data)
+        finally:
+            self._lk.release()
+
+    def get(self, path, fmt='text'):
+        self._fetch_livedata()
+        self._lk.acquire()
+        try:
+            ts = str(self._ts).partition('.')[0]
+            data = copy.deepcopy(self._data)
+        finally:
+            self._lk.release()
+
+        if path == '/':
+            if fmt == 'json':
+                d = { 'info' : { 'timestamp'     : ts,
+                                 'poll_interval' : self.poll,
+                                 'api'           : API } }
+                for k in data:
+                    d[k] = data[k].data()
+                return json.dumps(d)
+            s = "information\n"
+            s += f"  api : {API}\n"
+            s += f"  timestamp : {ts}\n"
+            s += f"  poll_interval : {self.poll} seconds\n\n"
+            for k in sorted(data):
+                s += f"{data[k]}\n\n"
+            return s[:-2]
+
+        spath = path.split('/')
+        name = spath[1].lower()
+        d = data.get(name, None)
+        if d is None:
+            return None
+        key = ''
+        if len(spath) > 2 and spath[2]:
+            key = spath[2].lower()
+
+        if not key:
+            if fmt == 'json':
+                return json.dumps(d.data())
+            return str(d)
+        else:
+            value = d.data().get(key, None)
+            if value is not None:
+                if fmt == 'json':
+                    return json.dumps({key : value})
+                return f"{value}"
+        return None
+
+class HouseholdCheck(AgentCheck):
+    def check(self, instance):
+        ok, name, ip, port = _find()
+        if not ok:
+            print("no GW1000 device found")
+            exit()
+        print(name, f"{ip}:{port}")
+
+        _HW = hw(ip, port, 0.5)
+
+        content = _HW.get("/","json")
+
+        dataObj = json.loads(content)
+
+        # Gauges for gateway sensors - office
+        self.gauge('household.office.temperature', dataObj["indoor"]["temperature"],tags=['ENV:HOUSEHOLD', 'ROOM:OFFICE'] + self.instance.get('tags', []))
+        self.gauge('household.office.humidity', dataObj["indoor"]["humidity"],tags=['ENV:HOUSEHOLD', 'ROOM:OFFICE'] + self.instance.get('tags', []))
+        self.gauge('household.office.pressure', dataObj["indoor"]["pressure_absolute"],tags=['ENV:HOUSEHOLD', 'ROOM:OFFICE'] + self.instance.get('tags', []))
+
+        # Gauges for sensor channel 1 - kitchen
+        self.gauge('household.kitchen.temperature', dataObj["channel_1"]["temperature"],tags=['ENV:HOUSEHOLD', 'ROOM:KITCHEN'] + self.instance.get('tags', []))
+        self.gauge('household.kitchen.humidity', dataObj["channel_1"]["humidity"],tags=['ENV:HOUSEHOLD', 'ROOM:KITCHEN'] + self.instance.get('tags', []))
+
+        # Gauges for sensor channel 2 - bird cage
+	    self.gauge('household.birdcage.temperature', dataObj["channel_2"]["temperature"],tags=['ENV:HOUSEHOLD', 'ROOM:BIRDCAGE'] + self.instance.get('tags', []))
+        self.gauge('household.birdcage.humidity', dataObj["channel_2"]["humidity"],tags=['ENV:HOUSEHOLD', 'ROOM:BIRDCAGE'] + self.instance.get('tags', []))

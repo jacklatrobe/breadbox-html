@@ -1,2 +1,4 @@
 # breadbox-html
-A simple website for Rahaf to add bread-related events to DataDog
+Contains images, assets and source code for the household monitoring used during Rahaf's breadmaking
+
+See: breadbox.jack-latrobe.com
