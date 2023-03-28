@@ -373,5 +373,5 @@ class HouseholdCheck(AgentCheck):
         self.gauge('household.kitchen.humidity', dataObj["channel_1"]["humidity"],tags=['ENV:HOUSEHOLD', 'ROOM:KITCHEN'] + self.instance.get('tags', []))
 
         # Gauges for sensor channel 2 - bird cage
-	    self.gauge('household.birdcage.temperature', dataObj["channel_2"]["temperature"],tags=['ENV:HOUSEHOLD', 'ROOM:BIRDCAGE'] + self.instance.get('tags', []))
+        self.gauge('household.birdcage.temperature', dataObj["channel_2"]["temperature"],tags=['ENV:HOUSEHOLD', 'ROOM:BIRDCAGE'] + self.instance.get('tags', []))
         self.gauge('household.birdcage.humidity', dataObj["channel_2"]["humidity"],tags=['ENV:HOUSEHOLD', 'ROOM:BIRDCAGE'] + self.instance.get('tags', []))
