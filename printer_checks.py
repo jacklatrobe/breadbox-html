@@ -11,6 +11,9 @@ except ImportError:
     # ...if the above failed, the check is running in Agent version < 6.6.0
     from checks import AgentCheck
 
+## NOTE: THIS NEEDS PANDAS ON THE AGENT, SEE:
+# https://docs.datadoghq.com/developers/guide/custom-python-package/?tab=windows
+
 # content of the special variable __version__ will be shown in the Agent status page
 __version__ = "1.0.0"
 
@@ -42,6 +45,6 @@ class PrinterCheck(AgentCheck):
         # Printer gauges
         default_tags = tags=["DEVICE:{}".format(printer_data["node_name"]),'ENV:HOUSEHOLD'] + self.instance.get('tags', [])
         self.gauge('household.printer.drum_left', printer_data["drum_left"],tags=default_tags)
-        self.gauge('household.printer.toner_left', printer_data["drum_left"],tags=default_tags)
-        self.gauge('household.printer.pages_printed', printer_data["drum_left"],tags=default_tags)
-        self.gauge('household.printer.pages_jammed', printer_data["drum_left"],tags=default_tags)
+        self.gauge('household.printer.toner_left', printer_data["toner_left"],tags=default_tags)
+        self.gauge('household.printer.pages_printed', printer_data["pages_printed"],tags=default_tags)
+        self.gauge('household.printer.pages_jammed', printer_data["pages_jammed"],tags=default_tags)
